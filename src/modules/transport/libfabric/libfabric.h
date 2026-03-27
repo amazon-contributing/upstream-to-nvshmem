@@ -83,10 +83,15 @@ typedef struct {
 struct nvshmemt_libfabric_gdr_op_ctx;
 typedef struct nvshmemt_libfabric_gdr_op_ctx nvshmemt_libfabric_gdr_op_ctx_t;
 
+/* Required bits in write-immediate data for staged atomics */
+#define NVSHMEM_STAGED_AMO_CQ_DATA_BITS 32
 #define NVSHMEM_STAGED_AMO_PUT_SIGNAL_SEQ_CNTR_BIT_SHIFT 16
 #define NVSHMEM_STAGED_AMO_IMM_HEADER_BIT_SHIFT 28
 #define NVSHMEM_STAGED_AMO_PUT_SIGNAL_SEQ_CNTR_BIT_MASK \
     ((1U << NVSHMEM_STAGED_AMO_PUT_SIGNAL_SEQ_CNTR_BIT_SHIFT) - 1)
+
+static_assert(NVSHMEM_STAGED_AMO_CQ_DATA_BITS % 8 == 0,
+              "NVSHMEM_STAGED_AMO_CQ_DATA_BITS is not a multiple of bytes");
 
 /**
  * Frequency at which we send an ack for puts (without signal). For puts-only,
