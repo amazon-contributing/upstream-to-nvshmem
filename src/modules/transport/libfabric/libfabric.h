@@ -83,7 +83,8 @@ typedef struct {
 struct nvshmemt_libfabric_gdr_op_ctx;
 typedef struct nvshmemt_libfabric_gdr_op_ctx nvshmemt_libfabric_gdr_op_ctx_t;
 
-#define NVSHMEM_STAGED_AMO_PUT_SIGNAL_SEQ_CNTR_BIT_SHIFT 28
+#define NVSHMEM_STAGED_AMO_PUT_SIGNAL_SEQ_CNTR_BIT_SHIFT 16
+#define NVSHMEM_STAGED_AMO_IMM_HEADER_BIT_SHIFT 28
 #define NVSHMEM_STAGED_AMO_PUT_SIGNAL_SEQ_CNTR_BIT_MASK \
     ((1U << NVSHMEM_STAGED_AMO_PUT_SIGNAL_SEQ_CNTR_BIT_SHIFT) - 1)
 
@@ -302,6 +303,7 @@ struct nvshmemt_libfabric_signal_comp_entry {
 struct nvshmemt_libfabric_put_ack_entry {
     fi_addr_t src_addr;
     nvshmemt_libfabric_endpoint_t *ep;
+    uint8_t put_count;
 };
 
 // Tagged union for completion entries
@@ -323,7 +325,11 @@ typedef struct nvshmemt_libfabric_gdr_send_amo_op {
     void *ret_addr;
     union {
         uint64_t retflag;
-        uint32_t sequence_count;
+        struct {
+            uint16_t sequence_count;
+            uint8_t preceding_put_count;
+            uint8_t reserved;
+        };
     };
     uint64_t swap_add;
     uint64_t comp;
@@ -586,13 +592,14 @@ typedef struct {
 struct signal_delivery_work_entry {
     nvshmemt_libfabric_gdr_op_ctx_t *op;
     nvshmemt_libfabric_gdr_op_ctx_t *send_elems[2];
-    uint32_t sequence_count;
+    uint16_t sequence_count;
+    uint8_t preceding_put_count;
 };
 
 struct signal_delivery_done_entry {
     nvshmemt_libfabric_gdr_op_ctx_t *op;
     nvshmemt_libfabric_gdr_op_ctx_t *send_elems[2];
-    uint32_t sequence_count;
+    uint16_t sequence_count;
     int src_pe;
     fi_addr_t src_addr;
     nvshmemt_libfabric_endpoint_t *ep;
@@ -600,6 +607,7 @@ struct signal_delivery_done_entry {
     uint64_t old_value;
     uint64_t ret_flags;
     void *ret_addr;
+    uint8_t preceding_put_count;
 };
 
 template <typename T, int CAPACITY = NVSHMEMT_LIBFABRIC_SIGNAL_QUEUE_CAPACITY>
@@ -719,7 +727,8 @@ static_assert(sizeof(nvshmemt_libfabric_mem_handle_t) <= nvshmemt_libfabric_mem_
 
 /* Wire data for put-signal gdr staged atomics
  * 32 bytes
- * | 4 type | 1 op | 1 elem_size | 2 num_writes | 8 signal | 8 target_addr | 4 sequence_count | 4 src_pe
+ * | 4 type | 1 op | 1 elem_size | 2 num_writes | 8 signal | 8 target_addr | 2 sequence_count
+ * | 1 preceding_put_count | 1 reserved | 4 src_pe
  */
 typedef struct nvshmemt_libfabric_gdr_signal_op {
     nvshmemt_libfabric_recv_t type; /* Must be first */
@@ -728,7 +737,9 @@ typedef struct nvshmemt_libfabric_gdr_signal_op {
     uint16_t num_writes;
     uint64_t sig_val;
     void *target_addr;
-    uint32_t sequence_count;
+    uint16_t sequence_count;
+    uint8_t  preceding_put_count;
+    uint8_t  reserved;
     uint32_t src_pe;
 } nvshmemt_libfabric_gdr_signal_op_t;
 /*  EFA's inline send size is 32 bytes */
@@ -739,12 +750,13 @@ static_assert(sizeof(nvshmemt_libfabric_gdr_signal_op_t) <=
               "Must fit within nvshmemt_libfabric_gdr_op_ctx_t");
 
 /* Wire data for AMO ack sent via fi_send
- * | 4 type | 4 ack_type | 4 sequence_count |
+ * | 4 type | 4 ack_type | 2 sequence_count | 1 put_count
  */
 typedef struct nvshmemt_libfabric_gdr_amo_ack_op {
     nvshmemt_libfabric_recv_t type; /* Must be first */
     nvshmemt_libfabric_ack_t ack_type;
-    uint32_t sequence_count;
+    uint16_t sequence_count;
+    uint8_t put_count;
 } nvshmemt_libfabric_gdr_amo_ack_op_t;
 static_assert(sizeof(nvshmemt_libfabric_gdr_amo_ack_op_t) <= 32,
               "Must fit within EFA's inline send limit of 32 bytes");
