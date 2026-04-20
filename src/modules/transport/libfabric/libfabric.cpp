@@ -1227,7 +1227,8 @@ static int nvshmemt_libfabric_rma(struct nvshmem_transport *tcurr, int pe, rma_v
 
     // Generate sequence number for P and PUT operations when ordering is needed
     if (use_staged_atomics &&
-        (verb.desc == NVSHMEMI_OP_P || verb.desc == NVSHMEMI_OP_PUT)) {
+        (verb.desc == NVSHMEMI_OP_P ||
+         (verb.desc == NVSHMEMI_OP_PUT && qp_index != NVSHMEMX_QP_HOST))) {
 
         /* Use host_signal_state for qp_index 0, proxy_signal_state otherwise */
         nvshmemt_libfabric_signal_state_t *signal_state =
