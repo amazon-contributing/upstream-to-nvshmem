@@ -659,6 +659,16 @@ typedef struct {
     int num_selected_devs;
     int max_nic_per_pe;
     std::atomic<uint32_t> proxy_ep_cntr;
+    /* Set by rma_batch_hint() before the next rma() call: carries the
+       NVSHMEM_RMA_FLAG_MORE bit for the upcoming op. Read by rma().
+       Slot 0 = host (NVSHMEMX_QP_HOST), slot 1 = proxy. Each slot is
+       single-writer/single-reader so no synchronization is needed. */
+    uint32_t pending_rma_flags[2];
+    /* EP chosen for the last FI_MORE-deferred doorbell; -1 = none pending.
+       Used by rma() to stick to the same EP while a doorbell is deferred
+       so get_next_ep() does not rotate to a different rail mid-batch.
+       Slot 0 = host, slot 1 = proxy (same scheme as pending_rma_flags). */
+    int fimore_pending_ep[2];
 
     /* Required for staged_amo */
     std::vector<std::unique_ptr<threadSafeOpQueue>> op_queue;

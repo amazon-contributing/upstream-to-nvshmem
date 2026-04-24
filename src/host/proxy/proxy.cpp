@@ -380,7 +380,8 @@ out:
     return status;
 }
 
-inline int process_channel_dma(proxy_state_t *state, proxy_channel_t *ch, int *is_processed) {
+inline int process_channel_dma(proxy_state_t *state, proxy_channel_t *ch, int *is_processed,
+                               int j = nvshmemi_options.PROXY_REQUEST_BATCH_MAX - 1) {
     int status = 0;
     base_request_t *base_req;
     put_dma_request_0_t *dma_req_0;
@@ -440,6 +441,28 @@ inline int process_channel_dma(proxy_state_t *state, proxy_channel_t *ch, int *i
         verb.is_nbi = 1;
         verb.is_stream = 0;
         verb.cstrm = NULL;
+        /* Peek ahead: batch consecutive DMA PUTs via the optional
+           host_ops.rma_batch_hint hook. Flush every
+           NVSHMEM_PROXY_FIMORE_FLUSH_INTERVAL ops (default 16, matches EFA's
+           internal flush cadence). Transports that do not install the hook
+           pay zero cost (NULL-check below). */
+        struct nvshmem_transport *tcurr = state->transport[pe];
+        if (tcurr->host_ops.rma_batch_hint) {
+            uint32_t hint_flags = 0;
+            int flush_interval = nvshmemi_options.PROXY_FIMORE_FLUSH_INTERVAL;
+            if (j != nvshmemi_options.PROXY_REQUEST_BATCH_MAX - 1 &&
+                (flush_interval <= 0 || (j % flush_interval) != flush_interval - 1)) {
+                uint64_t next_counter = ch->processed + PROXY_DMA_REQ_BYTES;
+                int next_flag = COUNTER_TO_FLAG(state, next_counter);
+                base_request_t *next_req = (base_request_t *)WRAPPED_CHANNEL_BUF(state, ch, next_counter);
+                uint8_t next_flag_val = __atomic_load_n(&next_req->flag, __ATOMIC_ACQUIRE) & 1;
+                if (next_flag_val == next_flag &&
+                    (next_req->op == NVSHMEMI_OP_PUT || next_req->op == NVSHMEMI_OP_PUT_QP)) {
+                    hint_flags = NVSHMEM_RMA_FLAG_MORE;
+                }
+            }
+            tcurr->host_ops.rma_batch_hint(tcurr, NVSHMEMX_QP_DEFAULT, hint_flags);
+        }
         void *rptr = (void *)((char *)(nvshmemi_device_state.heap_base) + roffset);
         nvshmemi_process_multisend_rma(state->transport[pe], state->transport_id[pe], pe, verb,
                                        rptr, (void *)laddr, size, qp_index);
@@ -1287,7 +1310,7 @@ inline void progress_channels(proxy_state_t *proxy_state) {
                     case NVSHMEMI_OP_PUT_QP:
                         TRACE(NVSHMEM_PROXY, "host proxy: received PUT \n");
                         is_processed = 0;
-                        status = process_channel_dma(proxy_state, ch, &is_processed);
+                        status = process_channel_dma(proxy_state, ch, &is_processed, j);
                         NVSHMEMI_NZ_EXIT(status, "error in process_channel_dma<PUT>\n");
                         break;
                     case NVSHMEMI_OP_G:
@@ -1296,7 +1319,7 @@ inline void progress_channels(proxy_state_t *proxy_state) {
                     case NVSHMEMI_OP_GET_QP:
                         TRACE(NVSHMEM_PROXY, "host proxy: received GET \n");
                         is_processed = 0;
-                        status = process_channel_dma(proxy_state, ch, &is_processed);
+                        status = process_channel_dma(proxy_state, ch, &is_processed, j);
                         if (likely(is_processed)) proxy_state->issued_get = 1;
                         NVSHMEMI_NZ_EXIT(status, "error in process_channel_dma<GET>\n");
                         break;
