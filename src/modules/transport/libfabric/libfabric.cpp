@@ -977,12 +977,6 @@ static int nvshmemt_libfabric_put_signal_completion(nvshmem_transport_t transpor
         uint32_t &next_seq = signal_state->next_expected_seq[pe];
 
         while (true) {
-            // Skip reserved sequence number
-            if (next_seq == NVSHMEM_STAGED_AMO_SEQ_NUM) {
-                next_seq = (next_seq + 1) & nvshmemt_libfabric_endpoint_seq_counter_t::sequence_mask;
-                continue;
-            }
-
             auto *it = signal_state->proxy_put_signal_comp_map[pe].find(next_seq);
 
             if (!it) break;
@@ -1030,7 +1024,7 @@ static int nvshmemt_libfabric_put_signal_completion(nvshmem_transport_t transpor
             }
 
             signal_state->proxy_put_signal_comp_map[pe].erase(next_seq);
-            next_seq = (next_seq + 1) & nvshmemt_libfabric_endpoint_seq_counter_t::sequence_mask;
+            next_seq = nvshmemt_libfabric_endpoint_seq_counter_t::seq_num_wrapup(next_seq + 1);
         }
     }
 
