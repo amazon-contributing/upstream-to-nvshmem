@@ -73,6 +73,15 @@ typedef struct nvshmem_transport_pe_info {
     cudaUUID_t gpu_uuid;
 } nvshmem_transport_pe_info_t;
 
+/*
+ * Transport-agnostic RMA batching hint, passed to the optional
+ * nvshmem_transport_host_ops::rma_batch_hint hook. NVSHMEM_RMA_FLAG_MORE
+ * tells the transport that more RMA ops follow immediately on the same
+ * qp_index so it may defer the doorbell/flush. Transports that do not
+ * implement the hook (NULL pointer) ignore the hint entirely.
+ */
+#define NVSHMEM_RMA_FLAG_MORE 0x1
+
 typedef struct rma_verb {
     nvshmemi_op_t desc;
     int is_nbi;
@@ -153,6 +162,13 @@ struct nvshmem_transport_host_ops {
     int (*add_device_remote_mem_handles)(struct nvshmem_transport *transport, int transport_stride,
                                          nvshmem_mem_handle_t *mem_handles, uint64_t heap_offset,
                                          size_t size);
+    /*
+     * Optional: hint that the next rma() call on this qp_index is part of a
+     * batch. flags: bitmask of NVSHMEM_RMA_FLAG_* (currently only
+     * NVSHMEM_RMA_FLAG_MORE). NULL = transport does not support batching
+     * hints; proxy must skip the call and pay zero cost.
+     */
+    void (*rma_batch_hint)(struct nvshmem_transport *transport, int qp_index, uint32_t flags);
 };
 
 typedef struct nvshmem_transport {
