@@ -448,10 +448,10 @@ static int nvshmemt_libfabric_gdr_complete_amos(nvshmem_transport_t transport) {
                                         : &libfabric_state->proxy_signal_state;
 
     if (done.sequence_count == NVSHMEM_STAGED_AMO_SEQ_NUM) {
-        signal_state->ack_aggregator->record_amo_ack(
+        status = signal_state->ack_aggregator->record_amo_ack(
             done.src_pe, transport, done.ep, done.src_addr);
     } else {
-        signal_state->ack_aggregator->record_ack(
+        status = signal_state->ack_aggregator->record_ack(
             done.src_pe, done.sequence_count, transport, done.ep, done.src_addr,
             done.preceding_put_count);
     }
@@ -515,11 +515,12 @@ out:
     return status;
 }
 
-void nvshmemt_libfabric_ack_aggregator::record_ack(
+int nvshmemt_libfabric_ack_aggregator::record_ack(
     int pe, uint16_t seq_num, nvshmem_transport_t transport,
     nvshmemt_libfabric_endpoint_t *ep, fi_addr_t dest_addr,
     uint8_t preceding_put_count) {
 
+    int status = 0;
     auto &pending = pending_per_peer[pe];
 
     uint16_t start_seq_num = nvshmemt_libfabric_endpoint_seq_counter_t::seq_num_wrapdown(
@@ -539,7 +540,8 @@ void nvshmemt_libfabric_ack_aggregator::record_ack(
             pending.range_end = seq_num;
         } else {
             /* Non-contiguous: flush current range, start new one */
-            flush_peer(pe, transport, ep, dest_addr);
+            status = flush_peer(pe, transport, ep, dest_addr);
+            if (unlikely(status)) return status;
             pending.range_end = seq_num;
             pending.range_count = preceding_put_count + 1;
             pending.has_range = true;
@@ -553,11 +555,12 @@ void nvshmemt_libfabric_ack_aggregator::record_ack(
     }
 
     if (pending.total_pending() >= NVSHMEMT_LIBFABRIC_ACK_AGGREGATOR_FLUSH_THRESHOLD) {
-        flush_peer(pe, transport, ep, dest_addr);
+        status = flush_peer(pe, transport, ep, dest_addr);
     }
+    return status;
 }
 
-void nvshmemt_libfabric_ack_aggregator::record_amo_ack(
+int nvshmemt_libfabric_ack_aggregator::record_amo_ack(
     int pe, nvshmem_transport_t transport,
     nvshmemt_libfabric_endpoint_t *ep, fi_addr_t dest_addr) {
     auto &pending = pending_per_peer[pe];
@@ -570,8 +573,9 @@ void nvshmemt_libfabric_ack_aggregator::record_amo_ack(
     }
 
     if (pending.total_pending() >= NVSHMEMT_LIBFABRIC_ACK_AGGREGATOR_FLUSH_THRESHOLD) {
-        flush_peer(pe, transport, ep, dest_addr);
+        return flush_peer(pe, transport, ep, dest_addr);
     }
+    return 0;
 }
 
 int nvshmemt_libfabric_ack_aggregator::flush_all(
