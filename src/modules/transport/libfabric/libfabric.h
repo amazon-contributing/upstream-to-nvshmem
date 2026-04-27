@@ -810,11 +810,11 @@ struct nvshmemt_libfabric_ack_aggregator {
         dirty_peers.reserve(npes);
     }
 
-    void record_ack(int pe, uint16_t seq_num, nvshmem_transport_t transport,
-                    nvshmemt_libfabric_endpoint_t *ep, fi_addr_t dest_addr,
-                    uint8_t preceding_put_count);
-    void record_amo_ack(int pe, nvshmem_transport_t transport,
-                        nvshmemt_libfabric_endpoint_t *ep, fi_addr_t dest_addr);
+    int record_ack(int pe, uint16_t seq_num, nvshmem_transport_t transport,
+                   nvshmemt_libfabric_endpoint_t *ep, fi_addr_t dest_addr,
+                   uint8_t preceding_put_count);
+    int record_amo_ack(int pe, nvshmem_transport_t transport,
+                       nvshmemt_libfabric_endpoint_t *ep, fi_addr_t dest_addr);
     int flush_peer(int pe, nvshmem_transport_t transport,
                    nvshmemt_libfabric_endpoint_t *ep, fi_addr_t dest_addr);
     int flush_all(nvshmem_transport_t transport, nvshmemt_libfabric_endpoint_t *ep);
