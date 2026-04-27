@@ -279,7 +279,7 @@ int gdrcopy_amo_ack(nvshmem_transport_t transport, nvshmemt_libfabric_endpoint_t
 
     NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out, "Unable to send atomic ack.\n");
     ep.submitted_ops++;
-    NVSHMEM_TRACE_RECEIVER_POST_ACK(convert_addr_to_pe(libfabric_state, &ep, dest_addr), ep.domain_index, range_end, ack_type);
+    NVSHMEM_TRACE_RECEIVER_POST_ACK(convert_addr_to_pe(libfabric_state, &ep, dest_addr), ep.domain_index, range_end, ack_op->type);
 
 out:
     return status;
