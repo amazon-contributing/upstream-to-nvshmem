@@ -586,6 +586,9 @@ typedef struct {
     std::vector<signal_seq_map> proxy_put_signal_comp_map;
     std::vector<uint32_t> next_expected_seq;
     struct nvshmemt_libfabric_ack_aggregator *ack_aggregator;
+    /* recursive because try_again() -> progress() -> put_signal_completion()
+     * may re-enter on the same thread. */
+    std::recursive_mutex mtx;
     uint64_t completed_staged_atomics;
 } nvshmemt_libfabric_signal_state_t;
 
@@ -689,6 +692,8 @@ typedef struct {
     nvshmem_transport_t signal_delivery_transport;
     std::atomic<int> signal_delivery_futex{0};
     std::atomic_flag signal_progress_lock = ATOMIC_FLAG_INIT;
+    /* Host EP CQ progress serialization. */
+    std::atomic_flag host_ep_progress_lock = ATOMIC_FLAG_INIT;
     /* signal_work_queue is SPSC (single consumer: delivery thread), but two
      * threads can push (put_signal_completion and gdr_process_amos).
      * Push-side serialization is provided by signal_work_queue_lock. */
