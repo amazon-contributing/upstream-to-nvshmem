@@ -151,6 +151,12 @@ struct nvshmemt_libfabric_endpoint_seq_counter_t {
     uint32_t sequence_counter;
     std::array<uint32_t, num_categories> pending_acks;
     uint32_t put_count;
+    /* High-water mark for total pending acks across all categories.
+     * Set to tx_attr.size - 256 at init. Caps the sender's outstanding
+     * signals so the receiver's ack fi_sends don't fill its tx ring
+     * and trigger a recursive try_again deadlock. See the init-time
+     * comment in libfabric.cpp for details. */
+    uint32_t ack_high_watermark;
 
     /**
      * Default constructor - initializes counter to zero
@@ -166,6 +172,7 @@ struct nvshmemt_libfabric_endpoint_seq_counter_t {
         sequence_counter = 0;
         pending_acks.fill(0);
         put_count = 0;
+        ack_high_watermark = UINT32_MAX;
     }
 
     /**
@@ -210,6 +217,18 @@ struct nvshmemt_libfabric_endpoint_seq_counter_t {
 
         /* Can't have more outstanding acks than sequence numbers in the category */
         assert(pending_acks[category] <= index_mask);
+
+        /* Refuse allocation when total outstanding approaches NIC tx depth.
+         * This caps the sender's in-flight signals so the receiver's ack
+         * fi_sends don't overwhelm its tx ring. See init-time comment. */
+        if (ack_high_watermark < UINT32_MAX) {
+            uint64_t total_pending = 0;
+            for (uint32_t c = 0; c < num_categories; c++) total_pending += pending_acks[c];
+            if (total_pending >= ack_high_watermark) {
+                return -1;
+            }
+        }
+
         /* Increment pending acks */
         ++pending_acks[category];
 
