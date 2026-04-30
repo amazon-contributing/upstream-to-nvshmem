@@ -2444,16 +2444,38 @@ static int nvshmemt_libfabric_connect_endpoints(nvshmem_transport_t t, int *sele
     /* Initialize state-level signal ordering state */
     {
         int npes = t->n_pes;
+
+        /* Compute ack high-water mark from NIC tx depth. Under a pure
+         * AMO burst, each signal generates an ack fi_send on the receiver.
+         * If the receiver's tx ring fills, ack fi_sends return EAGAIN and
+         * the proxy thread retries inside try_again, which polls the CQ
+         * and processes more incoming signals — each generating another
+         * ack that also hits EAGAIN. This recursive try_again loop
+         * prevents the ack backlog from ever draining, leading to
+         * deadlock. Capping the sender's outstanding signals below
+         * tx_attr.size limits the ack pressure on the receiver.
+         * TODO: fix try_again to not do sends during CQ processing. */
+        uint32_t min_tx_size = UINT32_MAX;
+        for (size_t i = 0; i < state->prov_infos.size(); i++) {
+            if (state->prov_infos[i]->tx_attr)
+                min_tx_size = std::min(min_tx_size, (uint32_t)state->prov_infos[i]->tx_attr->size);
+        }
+        uint32_t hwm = (min_tx_size > 256) ? min_tx_size - 256 : min_tx_size / 2;
+
         state->host_signal_state.put_signal_seq_counter_per_pe.resize(npes);
         state->host_signal_state.proxy_put_signal_comp_map.resize(npes);
         state->host_signal_state.next_expected_seq.resize(npes, 0);
         state->host_signal_state.ack_aggregator = new nvshmemt_libfabric_ack_aggregator_t(npes);
         state->host_signal_state.completed_staged_atomics = 0;
+        for (int pe = 0; pe < npes; pe++)
+            state->host_signal_state.put_signal_seq_counter_per_pe[pe].ack_high_watermark = hwm;
         state->proxy_signal_state.put_signal_seq_counter_per_pe.resize(npes);
         state->proxy_signal_state.proxy_put_signal_comp_map.resize(npes);
         state->proxy_signal_state.next_expected_seq.resize(npes, 0);
         state->proxy_signal_state.ack_aggregator = new nvshmemt_libfabric_ack_aggregator_t(npes);
         state->proxy_signal_state.completed_staged_atomics = 0;
+        for (int pe = 0; pe < npes; pe++)
+            state->proxy_signal_state.put_signal_seq_counter_per_pe[pe].ack_high_watermark = hwm;
     }
 
     for (size_t i = 0; i < state->prov_infos.size(); i++) {
