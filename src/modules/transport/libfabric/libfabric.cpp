@@ -1579,9 +1579,9 @@ static int nvshmemt_libfabric_rma(struct nvshmem_transport *tcurr, int pe, rma_v
 
         nvshmemt_libfabric_imm_cq_data_hdr_t header;
         uint8_t put_ack_count = 0;
-        if (seq_counter.put_count >= NVSHMEM_STAGED_AMO_PUT_ACK_FREQ) {
+        if (seq_counter.put_count >= seq_counter.put_ack_freq) {
             /* Make sure we didn't accidentally increment it anywhere else */
-            assert(seq_counter.put_count == NVSHMEM_STAGED_AMO_PUT_ACK_FREQ);
+            assert(seq_counter.put_count == seq_counter.put_ack_freq);
             put_ack_count = seq_counter.put_count;
             header = NVSHMEMT_LIBFABRIC_IMM_STANDALONE_PUT_WITH_ACK_REQ;
             seq_counter.put_count = 0;
@@ -1629,7 +1629,7 @@ static int nvshmemt_libfabric_gdr_amo(struct nvshmem_transport *transport, int p
                                              NVSHMEMT_LIBFABRIC_TRY_AGAIN_CALL_SITE_GDR_AMO_GET_NEXT_SENDS);
         if (status) goto out;
 
-        assert(seq_counter.put_count <= NVSHMEM_STAGED_AMO_PUT_ACK_FREQ);
+        assert(seq_counter.put_count <= seq_counter.put_ack_freq);
         uint8_t ppc = seq_counter.put_count;
         seq_counter.put_count = 0;
 
@@ -1937,7 +1937,7 @@ static int nvshmemt_libfabric_put_signal_unordered(struct nvshmem_transport *tcu
         goto out;
     }
 
-    assert(seq_counter.put_count <= NVSHMEM_STAGED_AMO_PUT_ACK_FREQ);
+    assert(seq_counter.put_count <= seq_counter.put_ack_freq);
     ppc = seq_counter.put_count;
     seq_counter.put_count = 0;
 
@@ -2484,15 +2484,27 @@ static int nvshmemt_libfabric_connect_endpoints(nvshmem_transport_t t, int *sele
         state->host_signal_state.next_expected_seq.resize(npes, 0);
         state->host_signal_state.ack_aggregator = new nvshmemt_libfabric_ack_aggregator_t(npes);
         state->host_signal_state.completed_staged_atomics = 0;
-        for (int pe = 0; pe < npes; pe++)
+        /* Link put_ack_freq to hwm so the invariant put_ack_freq <= hwm
+         * holds by construction.  At high npes (e.g. 64) hwm can drop
+         * below the static cap of 64; without this link sparse workloads
+         * deadlock because the sender blocks at hwm before put_count
+         * reaches put_ack_freq (no ack request is ever emitted).
+         * hwm/2 leaves headroom to avoid a race on the boundary put. */
+        uint32_t put_ack_freq_u = std::max(1u, hwm / 2);
+        uint8_t put_ack_freq = (uint8_t)std::min((uint32_t)NVSHMEM_STAGED_AMO_PUT_ACK_FREQ, put_ack_freq_u);
+        for (int pe = 0; pe < npes; pe++) {
             state->host_signal_state.put_signal_seq_counter_per_pe[pe].ack_high_watermark = hwm;
+            state->host_signal_state.put_signal_seq_counter_per_pe[pe].put_ack_freq = put_ack_freq;
+        }
         state->proxy_signal_state.put_signal_seq_counter_per_pe.resize(npes);
         state->proxy_signal_state.proxy_put_signal_comp_map.resize(npes);
         state->proxy_signal_state.next_expected_seq.resize(npes, 0);
         state->proxy_signal_state.ack_aggregator = new nvshmemt_libfabric_ack_aggregator_t(npes);
         state->proxy_signal_state.completed_staged_atomics = 0;
-        for (int pe = 0; pe < npes; pe++)
+        for (int pe = 0; pe < npes; pe++) {
             state->proxy_signal_state.put_signal_seq_counter_per_pe[pe].ack_high_watermark = hwm;
+            state->proxy_signal_state.put_signal_seq_counter_per_pe[pe].put_ack_freq = put_ack_freq;
+        }
     }
 
     for (size_t i = 0; i < state->prov_infos.size(); i++) {

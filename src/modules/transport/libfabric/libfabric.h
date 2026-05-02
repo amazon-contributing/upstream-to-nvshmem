@@ -98,6 +98,9 @@ static_assert(NVSHMEM_STAGED_AMO_CQ_DATA_BITS % 8 == 0,
  * we don't need the ack for every message for semantic reasons, we only need
  * an occasional ack to handle sequence number overflow correctly.
  */
+/* Hard upper bound on runtime put_ack_freq (fits in uint8_t on-wire field
+ * and bounds the static_assert on index space). Actual value is set per
+ * seq_counter at init in connect_endpoints as min(this, hwm/2). */
 #define NVSHMEM_STAGED_AMO_PUT_ACK_FREQ 64
 
 /**
@@ -164,6 +167,13 @@ struct nvshmemt_libfabric_endpoint_seq_counter_t {
      * and trigger a recursive try_again deadlock. See the init-time
      * comment in libfabric.cpp for details. */
     uint32_t ack_high_watermark;
+    /* Frequency of ack requests in the put path, linked to
+     * ack_high_watermark.  Must satisfy put_ack_freq <= ack_high_watermark
+     * (ideally with headroom) so the sender triggers an ack request
+     * before put_count saturates the HWM and blocks in next_seq_num.
+     * The static cap of 64 can exceed hwm=base_hwm/npes at high npes
+     * (e.g. 28 at 64 PEs), deadlocking sparse DeepEP LL workloads. */
+    uint8_t put_ack_freq;
 
     /**
      * Default constructor - initializes counter to zero
@@ -180,6 +190,7 @@ struct nvshmemt_libfabric_endpoint_seq_counter_t {
         pending_acks.fill(0);
         put_count = 0;
         ack_high_watermark = UINT32_MAX;
+        put_ack_freq = NVSHMEM_STAGED_AMO_PUT_ACK_FREQ;
     }
 
     /**
