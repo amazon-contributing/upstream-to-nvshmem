@@ -122,12 +122,16 @@ struct nvshmemt_libfabric_endpoint_seq_counter_t {
      * we don't need the ack for every message for semantic reasons. We only need
      * an occasional ack to handle sequence number overflow correctly.
      */
-    constexpr static uint32_t put_ack_freq = 64;
+    /* put_ack_freq: frequency of ack requests in the put path. Linked to
+     * ack_high_watermark at init in connect_endpoints: put_ack_freq = min(64, hwm/2).
+     * At high npes (hwm small), the 64 cap would exceed hwm and deadlock. */
+    constexpr static uint32_t PUT_ACK_FREQ_CAP = 64;
+    uint32_t put_ack_freq = PUT_ACK_FREQ_CAP;
 
     /* Assert that index_mask is large enough to simplify some ranged ack return
        logic. */
-    static_assert((index_mask + 1) >= (2 * put_ack_freq),
-                  "Number of indexes should be >= 2 * put_ack_freq");
+    static_assert((index_mask + 1) >= (2 * PUT_ACK_FREQ_CAP),
+                  "Number of indexes should be >= 2 * PUT_ACK_FREQ_CAP");
     constexpr static uint32_t category_mask = (1U << num_index_bits);
 
     constexpr static uint32_t sequence_mask = bit_mask;
