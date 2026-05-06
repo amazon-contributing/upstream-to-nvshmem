@@ -189,7 +189,11 @@ get_signal_state_locked(nvshmemt_libfabric_state_t *state,
 
 /* FI_THREAD_COMPLETION: user-thread submissions on host EP (eps[0..num_host_domains])
  * must be serialized with the proxy thread's fi_cq_read on the same CQ.
- * This guard acquires host_ep_progress_lock blockingly iff ep is a host EP. */
+ * This guard acquires host_ep_progress_lock blockingly iff ep is a host EP.
+ *
+ * host_ep_progress_lock is a non-recursive atomic_flag spinlock. Callers must
+ * not nest acquisitions on the same thread; all known call paths have been
+ * structured so re-entry does not occur. */
 struct host_ep_submit_guard {
     nvshmemt_libfabric_state_t *state;
     bool held;
@@ -197,12 +201,13 @@ struct host_ep_submit_guard {
                          const nvshmemt_libfabric_endpoint_t &ep)
         : state(s), held(false) {
         if (ep.domain_index < state->num_host_domains) {
-            state->host_ep_progress_lock.lock();
+            while (state->host_ep_progress_lock.test_and_set(std::memory_order_acquire))
+                NVSHMEMT_LIBFABRIC_CPU_RELAX();
             held = true;
         }
     }
     ~host_ep_submit_guard() {
-        if (held) state->host_ep_progress_lock.unlock();
+        if (held) state->host_ep_progress_lock.clear(std::memory_order_release);
     }
     host_ep_submit_guard(const host_ep_submit_guard&) = delete;
     host_ep_submit_guard& operator=(const host_ep_submit_guard&) = delete;
@@ -294,7 +299,8 @@ int gdrcopy_amo_ack(nvshmem_transport_t transport, nvshmemt_libfabric_endpoint_t
     nvshmemt_libfabric_gdr_amo_ack_op_t *ack_op;
     uint64_t num_retries = 0;
     int status;
-    host_ep_submit_guard _host_guard(libfabric_state, ep);
+
+    /* Caller must hold host_ep_progress_lock for host EPs (via host_ep_submit_guard). */
 
     do {
         status = libfabric_state->op_queue[ep.domain_index]->getNextSends(&send_elem, 1);
@@ -901,22 +907,29 @@ static int nvshmemt_libfabric_process_completion(nvshmem_transport_t transport, 
  * Safe for try_again paths that cannot re-enter the top-level progress loop.
  */
 /* Drain host EP CQs under host_ep_progress_lock. User-thread path (blocking=true)
- * acquires the lock; proxy path (blocking=false) try-locks and skips if the
- * user thread is already draining (they will make progress on their own).
- * Essence of upstream commit 756f773. */
+ * requires the caller to already hold host_ep_progress_lock (via
+ * host_ep_submit_guard at the data-path entry point or quiet's outer guard).
+ * Proxy path (blocking=false) try-locks and skips if the user thread is
+ * already draining (they will make progress on their own). */
 static inline int progress_host_eps(nvshmem_transport_t transport, bool blocking) {
     nvshmemt_libfabric_state_t *state = (nvshmemt_libfabric_state_t *)transport->state;
-    if (blocking) {
-        state->host_ep_progress_lock.lock();
-    } else if (!state->host_ep_progress_lock.try_lock()) {
-        return 0; /* user thread is draining; skip */
+    bool acquired_here = false;
+
+    /* If blocking == true, caller is assumed to hold the progress lock.
+       If blocking == false, attempt to take the lock here. */
+    if (!blocking) {
+        if (state->host_ep_progress_lock.test_and_set(std::memory_order_acquire)) {
+            return 0; /* user thread is draining; skip */
+        }
+        acquired_here = true;
     }
+
     int status = 0;
     for (int i = 0; i < state->num_host_domains; i++) {
         status = nvshmemt_libfabric_process_completion(transport, i);
         if (unlikely(status)) break;
     }
-    state->host_ep_progress_lock.unlock();
+    if (acquired_here) state->host_ep_progress_lock.clear(std::memory_order_release);
     return status;
 }
 
@@ -1000,6 +1013,8 @@ static int nvshmemt_libfabric_drain_deferred_work(nvshmem_transport_t transport)
         if (item.type == NVSHMEMT_LIBFABRIC_DEFERRED_SIGNAL_WORK) {
             status = nvshmemt_libfabric_enqueue_signal_work(transport, item.signal_work);
         } else {
+            /* gdrcopy_amo_ack requires host_ep_progress_lock held for host EPs. */
+            host_ep_submit_guard _host_guard(libfabric_state, *item.ack.ep);
             status = gdrcopy_amo_ack(transport, *item.ack.ep, item.ack.src_addr,
                                      item.ack.ack_payload.ack_seq_num,
                                      item.ack.ack_payload.ack_count,
@@ -1310,23 +1325,22 @@ static int nvshmemt_libfabric_quiet(struct nvshmem_transport *tcurr, int /*pe*/,
     }
 
     for (;;) {
+        /* host_ep_submit_guard is held across the whole iteration (including
+         * the progress call below) so the underlying lock can be non-recursive:
+         * flush_peer -> gdrcopy_amo_ack no longer re-acquires, and
+         * progress_host_eps (via progress -> drain_completions) will not
+         * re-acquire either. Lock order: host_ep_progress_lock -> signal_state.mtx. */
+        host_ep_submit_guard _host_guard(libfabric_state,
+                                         *libfabric_state->eps[ep_start_idx]);
+
         uint64_t total_submitted = 0;
         uint64_t total_completed = 0;
         {
-            /* Lock order: host_ep_progress_lock -> signal_state.mtx, matching
-             * gdr_complete_amos and user-thread paths. host_ep_submit_guard also
-             * gives a consistent snapshot of submitted_ops/completed_ops, since
-             * the proxy thread may mutate them via drain_deferred_work ->
-             * gdrcopy_amo_ack while holding host_ep_progress_lock. */
-            host_ep_submit_guard _host_guard(libfabric_state,
-                                             *libfabric_state->eps[ep_start_idx]);
             auto [signal_state_p, _sig_lk] =
                 get_signal_state_locked(libfabric_state, *libfabric_state->eps[ep_start_idx]);
             const nvshmemt_libfabric_signal_state_t &signal_state = *signal_state_p;
 
-            /* Force-flush all pending ACKs so they get sent before checking quiescence.
-             * flush_peer -> gdrcopy_amo_ack re-acquires host_ep_progress_lock
-             * recursively. */
+            /* Force-flush all pending ACKs so they get sent before checking quiescence. */
             if (signal_state.ack_aggregator) {
                 int ep_idx = (qp_index == NVSHMEMX_QP_HOST)
                                  ? 0
@@ -1629,9 +1643,10 @@ static int nvshmemt_libfabric_gdr_amo(struct nvshmem_transport *transport, int p
     domain_idx = ep.domain_index;
     target_ep = pe * libfabric_state->eps.size() + ep_idx;
 
+    host_ep_submit_guard _host_guard(libfabric_state, ep);
+
     /* Signal-only operations use gdr_signal path with num_writes=0 */
     if (is_signal_only_op(verb.desc)) {
-        host_ep_submit_guard _host_guard(libfabric_state, ep);
         auto [signal_state, _sig_lk] = get_signal_state_locked(libfabric_state, ep);
         auto &seq_counter = signal_state->put_signal_seq_counter[pe];
         uint32_t sequence_count = 0;
@@ -1671,7 +1686,6 @@ static int nvshmemt_libfabric_gdr_amo(struct nvshmem_transport *transport, int p
     amo->type = NVSHMEMT_LIBFABRIC_SEND;
 
     {
-        host_ep_submit_guard _host_guard(libfabric_state, ep);
         num_retries = 0;
         do {
             status =
@@ -1936,6 +1950,7 @@ static int nvshmemt_libfabric_put_signal_unordered(struct nvshmem_transport *tcu
 
     int ep_idx = get_next_ep(libfabric_state, qp_index);
     nvshmemt_libfabric_endpoint_t &ep = *(libfabric_state->eps[ep_idx]);
+    host_ep_submit_guard _host_guard(libfabric_state, ep);
 
     {
         auto [signal_state, _sig_lk] = get_signal_state_locked(libfabric_state, ep);
@@ -1957,7 +1972,6 @@ static int nvshmemt_libfabric_put_signal_unordered(struct nvshmem_transport *tcu
     assert(write_remote.size() == write_local.size() &&
            write_local.size() == write_bytes_desc.size());
     {
-        host_ep_submit_guard _host_guard(libfabric_state, ep);
         for (size_t i = 0; i < write_remote.size(); i++) {
             status =
                 nvshmemt_libfabric_rma_impl(tcurr, pe, write_verb, &write_remote[i], &write_local[i],
