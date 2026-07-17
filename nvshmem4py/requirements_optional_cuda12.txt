@@ -4,7 +4,7 @@
 mpi4py
 --index-url https://download.pytorch.org/whl/cu129
 --extra-index-url https://pypi.org/simple
-torch==2.8.0
+torch==2.12.1+cu130
 --index-url https://pypi.org/simple
 ml-dtypes
 # NOTE! If you are installing PyTorch, you should install these requirements AFTER PyTorch.
