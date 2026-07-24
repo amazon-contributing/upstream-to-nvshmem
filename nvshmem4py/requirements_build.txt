@@ -6,7 +6,7 @@ numpy>=2.3.3,<3; python_version >= "3.14"
 pycparser
 build
 Cython>=0.29.24
-setuptools==68
+setuptools==83.0.0
 setuptools_scm
 testresources
 wheel
